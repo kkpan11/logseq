@@ -132,8 +132,7 @@
     (worker-util/post-message :notification ["The SQLite db will be exported to avoid any data-loss." :warning false])
     (worker-util/post-message :export-current-db [])
     (.exec sqlite-db #js {:sql "delete from kvs"})
-    (d/reset-conn! datascript-conn db)
-    (db-migrate/fix-db! datascript-conn)))
+    (d/reset-conn! datascript-conn db)))
 
 (defn- fix-broken-graph
   [graph]
@@ -271,8 +270,6 @@
         (enable-sqlite-wal-mode! db'))
       (common-sqlite/create-kvs-table! db)
       (when-not @*publishing? (common-sqlite/create-kvs-table! client-ops-db))
-      (db-migrate/migrate-sqlite-db db)
-      (when-not @*publishing? (db-migrate/migrate-sqlite-db client-ops-db))
       (search/create-tables-and-triggers! search-db)
       (let [schema (ldb/get-schema repo)
             conn (common-sqlite/get-storage-conn storage schema)
@@ -307,9 +304,11 @@
                   compare-result (when version-in-db (db-schema/compare-schema-version version-in-db "64.8"))]
               (when (and compare-result (not (neg? compare-result))) ; >= 64.8
                 (worker-util/post-message :capture-error
-                                          {:error "db-missing-addresses-v2"
+                                          {:error "db-missing-addresses-v3"
                                            :payload {:missing-addresses (str missing-addresses)
-                                                     :db-schema-version (str version-in-db)}})))
+                                                     :db-schema-version (str version-in-db)
+                                                     :graph-git-sha (when conn
+                                                                      (:kv/value (:logseq.kv/graph-git-sha @conn)))}})))
             (worker-util/post-message :notification ["It seems that the DB has been broken. Please run the command `Fix current broken graph`." :error false])
             (throw (ex-info "DB missing addresses" {:missing-addresses missing-addresses}))))
 
@@ -466,6 +465,11 @@
   [repo id]
   (when-let [conn (worker-state/get-datascript-conn repo)]
     (ldb/get-block-refs-count @conn id)))
+
+(def-thread-api :thread-api/get-block-source
+  [repo id]
+  (when-let [conn (worker-state/get-datascript-conn repo)]
+    (:db/id (first (:block/_alias (d/entity @conn id))))))
 
 (def-thread-api :thread-api/block-refs-check
   [repo id {:keys [unlinked?]}]
@@ -668,9 +672,7 @@
 (def-thread-api :thread-api/validate-db
   [repo]
   (when-let [conn (worker-state/get-datascript-conn repo)]
-    (let [result (worker-db-validate/validate-db @conn)]
-      (db-migrate/fix-db! conn {:invalid-entity-ids (:invalid-entity-ids result)})
-      result)))
+    (worker-db-validate/validate-db @conn)))
 
 (def-thread-api :thread-api/export-edn
   [repo options]
@@ -679,6 +681,7 @@
       (sqlite-export/build-export @conn options)
       (catch :default e
         (js/console.error "export-edn error: " e)
+        (js/console.error "Stack:\n" (.-stack e))
         (worker-util/post-message :notification
                                   ["An unexpected error occurred during export. See the javascript console for details."
                                    :error])
