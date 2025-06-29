@@ -2,7 +2,8 @@
   "Common fns for file and db based page handlers, including create!, delete!
   and favorite fns. This ns should be agnostic of file or db concerns but there
   is still some file-specific tech debt to remove from create!"
-  (:require [clojure.string :as string]
+  (:require [clojure.set :as set]
+            [clojure.string :as string]
             [datascript.core :as d]
             [dommy.core :as dom]
             [frontend.config :as config]
@@ -55,8 +56,17 @@
                                (common-util/split-first (str "#" page-ref/left-brackets) (:block/title parsed-result)))
                               string/trim)
                       title)]
-       (if (and has-tags? (nil? title'))
-         (notification/show! "Page name can't include \"#\"." :warning)
+       (cond
+         (and has-tags? (nil? title'))
+         (notification/show! "Page name can't include \"#\"." :error)
+         (and has-tags?
+              (seq (set/intersection ldb/private-tags (set (map :db/ident (:block/tags parsed-result))))))
+         (notification/show! (str "New page can't set built-in tags: "
+                                  (string/join ", "
+                                               (keep #(when (ldb/private-tags (:db/ident %)) (pr-str (:block/title %)))
+                                                     (:block/tags parsed-result))))
+                             :error)
+         :else
          (when-not (string/blank? title')
            (p/let [options' (if db-based?
                               (cond-> (update options :tags concat (:block/tags parsed-result))
@@ -73,7 +83,7 @@
                  (js/setTimeout
                   (fn []
                     (when-let [block-add-button (->> (dom/sel ".block-add-button")
-                                                     (filter #(= (str (:db/id page)) (dom/attr % "data-blockId")))
+                                                     (filter #(= (str (:db/id page)) (dom/attr % "data-block-id")))
                                                      first)]
                       (.click block-add-button)))
                   200)))
